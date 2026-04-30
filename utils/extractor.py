@@ -6,15 +6,23 @@ Returns a JSON object with:
     connected_load_kw, tariff_category, avg_monthly_consumption
 """
 
+import hashlib
 import json
 import mimetypes
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import google.generativeai as genai
 from google.api_core import exceptions as gax_exceptions
+
+
+# In-process cache of {file_sha256: extraction_dict} so re-running the same
+# bill is free (matters when free-tier quota is tight).
+_CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHE_LOCK = threading.Lock()
 
 PROMPT = """
 You are an expert document parser specialised in MSEDCL (Maharashtra State
@@ -112,10 +120,19 @@ def extract_bill_data(file_path: str, api_key: str) -> Dict[str, Any]:
         )
 
     genai.configure(api_key=api_key)
+
+    # Cache lookup - identical bill -> identical extraction, no API call.
+    file_bytes = Path(file_path).read_bytes()
+    cache_key = hashlib.sha256(file_bytes + api_key.encode()).hexdigest()
+    with _CACHE_LOCK:
+        if cache_key in _CACHE:
+            return _CACHE[cache_key]
+
     file_part = _load_file_part(file_path)
 
     candidates = _candidate_models()
     last_err: Optional[Exception] = None
+    quota_errors: list[str] = []
 
     for name in candidates:
         try:
@@ -129,20 +146,40 @@ def extract_bill_data(file_path: str, api_key: str) -> Dict[str, Any]:
             )
             raw = response.text or ""
             data = _coerce_json(raw)
-            return _normalise(data)
+            data = _normalise(data)
+            with _CACHE_LOCK:
+                _CACHE[cache_key] = data
+            return data
 
         except gax_exceptions.NotFound as e:
-            # Model name doesn't exist or isn't callable on this API
-            # version. Try the next candidate.
+            # Model name doesn't exist or isn't callable.
             last_err = e
             continue
         except gax_exceptions.FailedPrecondition as e:
-            # e.g. model deprecated for this key/region.
+            # Model deprecated for this key/region.
             last_err = e
             continue
+        except gax_exceptions.ResourceExhausted as e:
+            # 429 - quota exhausted on this model. Each model has its own
+            # quota bucket, so try the next candidate.
+            last_err = e
+            quota_errors.append(name)
+            continue
         except Exception as e:  # noqa: BLE001
-            # Anything else (auth, JSON parsing, etc.) is not a model issue.
             raise
+
+    if quota_errors and len(quota_errors) == len(candidates):
+        raise RuntimeError(
+            "All Gemini Flash models hit free-tier quota for this API key.\n\n"
+            "This usually means the project's free-tier quota is set to 0. "
+            "Fix it by:\n"
+            "  1. Creating a fresh key at https://aistudio.google.com/app/apikey "
+            "(use 'Create API key in new project' - new AI Studio projects get "
+            "free tier by default).\n"
+            "  2. OR enabling billing on the existing Google Cloud project at "
+            "https://console.cloud.google.com/billing.\n\n"
+            f"Models tried: {quota_errors}"
+        )
 
     raise RuntimeError(
         f"No working Gemini Flash model for this API key. "
