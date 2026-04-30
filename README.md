@@ -20,14 +20,44 @@ the Solar Load template is filled without touching any formulas.
 
 ```
 EnergyBae/
-├── app.py                  # Streamlit UI
+├── app.py                              # Streamlit UI
 ├── requirements.txt
 ├── .env.example
+├── .streamlit/
+│   └── secrets.toml.example
 ├── README.md
+├── SUBMISSION_NOTE.md
+├── templates/
+│   └── solar_load_template.xlsx        # bundled Solar Load template
+├── samples/
+│   └── SolarLoad_SampleOutput.xlsx     # demo of a filled output
+├── scripts/
+│   └── build_template.py               # regenerate the template
+├── tests/
+│   └── test_excel_handler.py
 └── utils/
     ├── __init__.py
-    ├── extractor.py        # Gemini 1.5 Flash bill parser
-    └── excel_handler.py    # openpyxl writer (formula-safe)
+    ├── extractor.py                    # Gemini 1.5 Flash bill parser
+    └── excel_handler.py                # openpyxl writer (formula-safe)
+```
+
+## About the Excel template
+
+The repo ships a working **`templates/solar_load_template.xlsx`** so the app
+produces real output out of the box. It has the same input cells the parser
+expects (`C5–C10`) plus seven downstream formulas: annual consumption, system
+size (kWp), generation, savings, system cost, payback period, and 25-year
+ROI. The app uses this bundled file automatically.
+
+When the official Energybae template is available, drop it into
+`templates/solar_load_template.xlsx` (overwriting the bundled one) and update
+`DEFAULT_CELL_MAP` in `utils/excel_handler.py` to match the real input cells.
+Sales staff can also override per-session by uploading a different `.xlsx`
+in the sidebar.
+
+To regenerate the bundled template:
+```bash
+python scripts/build_template.py
 ```
 
 ## Setup
@@ -36,12 +66,50 @@ EnergyBae/
 python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env                # then add your GOOGLE_API_KEY
+```
+
+Get a Gemini API key at <https://aistudio.google.com/app/apikey>.
+
+### Local dev
+
+```bash
+cp .env.example .env                # paste GOOGLE_API_KEY
 streamlit run app.py
 ```
 
-Get a Gemini API key at <https://aistudio.google.com/app/apikey>. You can
-either paste it into the sidebar at runtime or set `GOOGLE_API_KEY` in `.env`.
+…or use Streamlit's secrets file:
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# edit and add GOOGLE_API_KEY
+streamlit run app.py
+```
+
+### Deployment (Streamlit Community Cloud)
+
+The end-users (sales team) **never see or enter the API key**. The admin
+configures it once:
+
+1. Push the repo to GitHub.
+2. <https://share.streamlit.io> -> **New app** -> point at this repo.
+3. **Settings -> Secrets** -> paste:
+   ```toml
+   GOOGLE_API_KEY = "AIza...your_key..."
+   ```
+4. Save. The app reads the key from `st.secrets` automatically; the sidebar
+   shows "Gemini API key loaded" and no input field.
+
+Same pattern works on Render, Railway, Fly, or any host that supports env
+vars - just set `GOOGLE_API_KEY` in the host's environment.
+
+### Models
+
+The brief specified Gemini 1.5 Flash. Google has rotated model aliases over
+time, so `utils/extractor.py` walks a candidate list
+(`gemini-1.5-flash-latest` -> `gemini-flash-latest` -> `gemini-1.5-flash` ->
+2.0/2.5 flash) and uses the first one that resolves for the active key. If
+all named candidates fail, it queries `list_models()` and picks any flash
+model that supports `generateContent`.
 
 ## Adapting to the real template
 

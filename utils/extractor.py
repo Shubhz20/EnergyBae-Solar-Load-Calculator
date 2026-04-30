@@ -8,14 +8,13 @@ Returns a JSON object with:
 
 import json
 import mimetypes
+import os
 import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import google.generativeai as genai
-
-
-MODEL_NAME = "gemini-1.5-flash"
+from google.api_core import exceptions as gax_exceptions
 
 PROMPT = """
 You are an expert document parser specialised in MSEDCL (Maharashtra State
@@ -98,25 +97,105 @@ def _normalise(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def extract_bill_data(file_path: str, api_key: str) -> Dict[str, Any]:
     """
-    Send the bill (PDF or image) to Gemini 1.5 Flash and return the parsed
-    field dictionary.
+    Send the bill (PDF or image) to Gemini Flash and return the parsed
+    field dictionary. Walks live model candidates and retries on 404 /
+    deprecation errors.
     """
     if not api_key:
         raise ValueError("Gemini API key is required.")
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(MODEL_NAME)
+    api_key = api_key.strip()
+    if not api_key.startswith("AIza"):
+        raise ValueError(
+            "That doesn't look like a Gemini API key. Keys from "
+            "https://aistudio.google.com/app/apikey start with 'AIza'."
+        )
 
+    genai.configure(api_key=api_key)
     file_part = _load_file_part(file_path)
 
-    response = model.generate_content(
-        [PROMPT, file_part],
-        generation_config={
-            "temperature": 0.0,
-            "response_mime_type": "application/json",
-        },
+    candidates = _candidate_models()
+    last_err: Optional[Exception] = None
+
+    for name in candidates:
+        try:
+            model = genai.GenerativeModel(name)
+            response = model.generate_content(
+                [PROMPT, file_part],
+                generation_config={
+                    "temperature": 0.0,
+                    "response_mime_type": "application/json",
+                },
+            )
+            raw = response.text or ""
+            data = _coerce_json(raw)
+            return _normalise(data)
+
+        except gax_exceptions.NotFound as e:
+            # Model name doesn't exist or isn't callable on this API
+            # version. Try the next candidate.
+            last_err = e
+            continue
+        except gax_exceptions.FailedPrecondition as e:
+            # e.g. model deprecated for this key/region.
+            last_err = e
+            continue
+        except Exception as e:  # noqa: BLE001
+            # Anything else (auth, JSON parsing, etc.) is not a model issue.
+            raise
+
+    raise RuntimeError(
+        f"No working Gemini Flash model for this API key. "
+        f"Tried: {candidates}. Last error: {last_err}"
     )
 
-    raw = response.text or ""
-    data = _coerce_json(raw)
-    return _normalise(data)
+
+def _candidate_models() -> list[str]:
+    """
+    Build a prioritised list of model names to try.
+
+    Priority:
+        1. Explicit override via GEMINI_MODEL env var (admin escape hatch).
+        2. Whatever live Flash models list_models() reports as supporting
+           generateContent, ordered: 2.0 Flash -> 2.5 Flash -> 1.5 Flash
+           (1.5 is deprecated as of 2026), preferring "-latest" aliases.
+        3. Hard-coded fallback chain in case list_models() fails.
+    """
+    override = os.environ.get("GEMINI_MODEL", "").strip()
+    if override:
+        return [override]
+
+    try:
+        live = list(genai.list_models())
+        flash = [
+            m for m in live
+            if "flash" in getattr(m, "name", "").lower()
+            and "generateContent" in (getattr(m, "supported_generation_methods", []) or [])
+        ]
+
+        def rank(m) -> tuple:
+            n = m.name.lower()
+            gen = (
+                0 if "2.0-flash" in n
+                else 1 if "2.5-flash" in n
+                else 2 if "flash-latest" in n
+                else 3 if "1.5-flash" in n
+                else 4
+            )
+            latest_bonus = 0 if n.endswith("-latest") else 1
+            return (gen, latest_bonus, len(n))
+
+        flash.sort(key=rank)
+        names = [m.name.split("/")[-1] for m in flash]
+        if names:
+            return names
+    except Exception:
+        pass
+
+    # Hard-coded fallback if list_models is unavailable.
+    return [
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-1.5-flash-latest",
+    ]

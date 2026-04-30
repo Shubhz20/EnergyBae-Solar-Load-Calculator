@@ -11,6 +11,7 @@ env/
 
 # Streamlit
 .streamlit/secrets.toml
+.streamlit/credentials.toml
 
 # OS / IDE
 .DS_Store

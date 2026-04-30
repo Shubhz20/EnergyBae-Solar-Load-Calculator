@@ -34,22 +34,36 @@ st.caption(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar - configuration
+# API key - resolved silently from Streamlit secrets or env. End users never
+# see it. If it's missing, that's an admin/deployment problem, not an end-user
+# problem - we surface a clean error instead of an input field.
 # ---------------------------------------------------------------------------
-with st.sidebar:
-    st.header("Configuration")
-    api_key = st.text_input(
-        "Gemini API Key",
-        type="password",
-        value=os.getenv("GOOGLE_API_KEY", ""),
-        help="Get one at https://aistudio.google.com/app/apikey",
-    )
+def _resolve_api_key() -> str:
+    try:
+        if "GOOGLE_API_KEY" in st.secrets:
+            return str(st.secrets["GOOGLE_API_KEY"]).strip()
+    except Exception:
+        pass
+    return os.getenv("GOOGLE_API_KEY", "").strip()
 
-    template_file = st.file_uploader(
-        "Solar Load Excel Template (.xlsx)",
+
+api_key = _resolve_api_key()
+
+# ---------------------------------------------------------------------------
+# Bundled Solar Load template - shipped with the repo so the app always has
+# something to fill. Sales team can also upload their own.
+# ---------------------------------------------------------------------------
+BUNDLED_TEMPLATE_PATH = Path(__file__).parent / "templates" / "solar_load_template.xlsx"
+
+with st.sidebar:
+    st.header("Template")
+    uploaded_template = st.file_uploader(
+        "Use a different template (optional)",
         type=["xlsx"],
-        help="Upload the Energybae Solar Load template. Formulas are preserved.",
+        help="Leave empty to use the bundled Solar Load template.",
     )
+    if uploaded_template is None and BUNDLED_TEMPLATE_PATH.exists():
+        st.caption("Using bundled Solar Load template.")
 
 # ---------------------------------------------------------------------------
 # Main - bill upload
@@ -138,18 +152,30 @@ if st.session_state.extracted:
     # -----------------------------------------------------------------------
     st.subheader("Generate Filled Excel")
 
-    if template_file is None:
-        st.info("Upload the Solar Load Excel Template in the sidebar to proceed.")
+    if uploaded_template is not None:
+        template_bytes = uploaded_template.getvalue()
+        template_source = "uploaded template"
+    elif BUNDLED_TEMPLATE_PATH.exists():
+        template_bytes = BUNDLED_TEMPLATE_PATH.read_bytes()
+        template_source = "bundled template"
+    else:
+        template_bytes = None
+        template_source = None
+
+    if template_bytes is None:
+        st.error(
+            "No template available. Upload one in the sidebar or contact "
+            "the admin to add the bundled Solar Load template."
+        )
     else:
         if st.button("Fill Template & Prepare Download", use_container_width=True):
             try:
-                template_bytes = template_file.getvalue()
                 output_bytes = fill_solar_load_template(template_bytes, verified)
 
                 out_name = (
                     f"SolarLoad_{(consumer_number or 'output').strip().replace(' ', '_')}.xlsx"
                 )
-                st.success("Excel generated. Formulas preserved.")
+                st.success(f"Excel generated using the {template_source}. Formulas preserved.")
                 st.download_button(
                     label="Download Filled Excel",
                     data=output_bytes,
