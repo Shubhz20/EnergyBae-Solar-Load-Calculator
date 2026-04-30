@@ -19,6 +19,7 @@ except Exception:
 
 from utils.extractor import extract_bill_data
 from utils.excel_handler import fill_solar_load_template
+from utils.regex_extractor import extract_from_pdf as extract_offline
 
 st.set_page_config(
     page_title="Energybae | MSEDCL Bill Automation",
@@ -73,6 +74,13 @@ bill_file = st.file_uploader(
     type=["pdf", "png", "jpg", "jpeg"],
 )
 
+use_offline_only = st.checkbox(
+    "Use offline parser only (no Gemini API)",
+    value=False,
+    help="Skips the Gemini call entirely. Works for PDF bills with "
+         "selectable text. Use this when API quota is exhausted.",
+)
+
 if "extracted" not in st.session_state:
     st.session_state.extracted = None
 
@@ -80,24 +88,45 @@ if "extracted" not in st.session_state:
 # Step 1 - Extract
 # ---------------------------------------------------------------------------
 if bill_file is not None:
-    if st.button("Extract Data with Gemini", type="primary", use_container_width=True):
-        if not api_key:
-            st.error("Please provide a Gemini API key in the sidebar.")
-        else:
-            with st.spinner("Calling Gemini 1.5 Flash..."):
-                try:
-                    suffix = Path(bill_file.name).suffix.lower()
-                    with tempfile.NamedTemporaryFile(
-                        delete=False, suffix=suffix
-                    ) as tmp:
-                        tmp.write(bill_file.getvalue())
-                        tmp_path = tmp.name
+    button_label = (
+        "Extract Data (offline parser)"
+        if use_offline_only
+        else "Extract Data with Gemini"
+    )
+    if st.button(button_label, type="primary", use_container_width=True):
+        suffix = Path(bill_file.name).suffix.lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(bill_file.getvalue())
+            tmp_path = tmp.name
 
+        try:
+            if use_offline_only:
+                if suffix != ".pdf":
+                    raise ValueError(
+                        "Offline parser only handles PDFs. Uncheck the box "
+                        "or upload a PDF."
+                    )
+                with st.spinner("Reading PDF locally..."):
+                    data = extract_offline(tmp_path)
+                    data["_method"] = "offline_regex"
+            else:
+                if not api_key:
+                    raise RuntimeError(
+                        "GOOGLE_API_KEY isn't configured. Either tick the "
+                        "offline parser box, or ask the admin to set the "
+                        "key in Streamlit Secrets."
+                    )
+                with st.spinner("Calling Gemini Flash..."):
                     data = extract_bill_data(tmp_path, api_key=api_key)
-                    st.session_state.extracted = data
-                    st.success("Extraction complete. Verify the fields below.")
-                except Exception as e:
-                    st.error(f"Extraction failed: {e}")
+
+            st.session_state.extracted = data
+            method = data.get("_method", "gemini")
+            if method == "offline_regex":
+                st.success("Extracted via offline parser. Verify fields below.")
+            else:
+                st.success("Extracted via Gemini. Verify fields below.")
+        except Exception as e:
+            st.error(f"Extraction failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Step 2 - Verify (Human-in-the-Loop)

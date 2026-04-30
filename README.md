@@ -102,14 +102,26 @@ configures it once:
 Same pattern works on Render, Railway, Fly, or any host that supports env
 vars - just set `GOOGLE_API_KEY` in the host's environment.
 
-### Models
+### Models & extraction strategy
 
-The brief specified Gemini 1.5 Flash. Google has rotated model aliases over
-time, so `utils/extractor.py` walks a candidate list
-(`gemini-1.5-flash-latest` -> `gemini-flash-latest` -> `gemini-1.5-flash` ->
-2.0/2.5 flash) and uses the first one that resolves for the active key. If
-all named candidates fail, it queries `list_models()` and picks any flash
-model that supports `generateContent`.
+The brief specified Gemini 1.5 Flash. Two-tier extraction:
+
+1. **Gemini Flash (primary)** — `utils/extractor.py` queries `list_models()`
+   for live Flash models, ranks them (2.0 -> 2.5 -> flash-latest -> 1.5),
+   and cascades through them on 404 / 429 / FailedPrecondition. Each model
+   has its own quota bucket so a 429 on one doesn't kill the request.
+2. **Offline regex parser (fallback)** — `utils/regex_extractor.py` uses
+   PyMuPDF to extract text from the PDF and applies MSEDCL-tuned regex for
+   each field. **Zero API calls, zero quota.** Runs automatically when every
+   Gemini model fails, or on demand via the "Use offline parser only"
+   checkbox in the UI.
+
+Image bills (PNG/JPG) require Gemini's vision capability; the offline
+parser only works on PDFs with selectable text.
+
+Admin override: set `GEMINI_MODEL=gemini-2.0-flash` in secrets to lock the
+app to one specific model. Don't set this if you want the cascade — it
+disables fallback to other models.
 
 ## Adapting to the real template
 

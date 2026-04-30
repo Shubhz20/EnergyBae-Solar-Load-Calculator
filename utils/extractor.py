@@ -168,16 +168,29 @@ def extract_bill_data(file_path: str, api_key: str) -> Dict[str, Any]:
         except Exception as e:  # noqa: BLE001
             raise
 
+    # If we got here every Gemini call failed. Try the offline parser for
+    # PDFs as a last resort - zero API, zero quota.
+    if Path(file_path).suffix.lower() == ".pdf":
+        try:
+            from utils.regex_extractor import extract_from_pdf
+            data = extract_from_pdf(file_path)
+            data["_method"] = "offline_regex"
+            with _CACHE_LOCK:
+                _CACHE[cache_key] = data
+            return data
+        except Exception as fallback_err:  # noqa: BLE001
+            last_err = f"Gemini failed and offline parser also failed: {fallback_err}"
+
     if quota_errors and len(quota_errors) == len(candidates):
         raise RuntimeError(
-            "All Gemini Flash models hit free-tier quota for this API key.\n\n"
-            "This usually means the project's free-tier quota is set to 0. "
-            "Fix it by:\n"
-            "  1. Creating a fresh key at https://aistudio.google.com/app/apikey "
-            "(use 'Create API key in new project' - new AI Studio projects get "
-            "free tier by default).\n"
-            "  2. OR enabling billing on the existing Google Cloud project at "
-            "https://console.cloud.google.com/billing.\n\n"
+            "All Gemini Flash models hit free-tier quota AND the offline "
+            "parser couldn't read this file.\n\n"
+            "Fixes:\n"
+            "  - For PDF bills: the offline parser should normally work. "
+            "Check that the PDF has selectable text (not a scan).\n"
+            "  - For images/scans: you need a working Gemini key. Create a "
+            "fresh one at https://aistudio.google.com/app/apikey using "
+            "'Create API key in new project'.\n"
             f"Models tried: {quota_errors}"
         )
 
