@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Output artifacts
+*.xlsx~
+*.tmp
+outputs/
