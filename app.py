@@ -18,7 +18,7 @@ except Exception:
     pass
 
 from utils.extractor import extract_bill_data
-from utils.excel_handler import fill_solar_load_template
+from utils.excel_handler import fill_solar_load_template, fill_template_auto
 from utils.regex_extractor import extract_from_pdf as extract_offline
 
 st.set_page_config(
@@ -199,7 +199,7 @@ if st.session_state.extracted:
     else:
         if st.button("Fill Template & Prepare Download", use_container_width=True):
             try:
-                output_bytes = fill_solar_load_template(template_bytes, verified)
+                output_bytes = fill_template_auto(template_bytes, verified)
 
                 out_name = (
                     f"SolarLoad_{(consumer_number or 'output').strip().replace(' ', '_')}.xlsx"

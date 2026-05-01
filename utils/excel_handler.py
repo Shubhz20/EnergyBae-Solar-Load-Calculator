@@ -62,6 +62,80 @@ def _split_coord(coord: str) -> Tuple[str, int]:
     return col, row
 
 
+def detect_template_kind(template_bytes: bytes) -> str:
+    """
+    Inspect the workbook and return one of:
+        "pranay"  - the two-consumer "E-Bill Analysis" layout
+        "simple"  - the bundled C5..C10 single-consumer layout
+        "unknown" - fall back to "simple" but warn
+    """
+    wb = load_workbook(io.BytesIO(template_bytes), keep_vba=False, data_only=False)
+    ws = wb.active
+
+    def at(coord):
+        v = ws[coord].value
+        return str(v).strip().lower() if v is not None else ""
+
+    # Pranay template fingerprints
+    if (
+        "consumer name" in at("B1")
+        and "consumer no" in at("B2")
+        and "solar pannel used" in at("B7")
+        and at("B8") == "sr.no"
+        and "units" in at("D8")
+        and "month" in at("G8")
+    ):
+        return "pranay"
+
+    # Simple bundled template fingerprint
+    if (
+        "consumer name" in at("B5")
+        and "consumer no" in at("B6").replace(".", "")
+    ):
+        return "simple"
+
+    return "unknown"
+
+
+def fill_template_auto(template_bytes: bytes, data: Dict[str, Any]) -> bytes:
+    """
+    Smart entry point: detect the template's layout and dispatch to the
+    correct writer. Use this from the Streamlit app instead of calling the
+    individual fillers.
+    """
+    kind = detect_template_kind(template_bytes)
+    if kind == "pranay":
+        # Lazy import to avoid circular module loading at import time.
+        from utils.pranay_template import fill_pranay_template
+
+        load = data.get("connected_load_kw")
+        if isinstance(load, (int, float)):
+            load_str = f"{int(load)}KW" if float(load).is_integer() else f"{load}KW"
+        elif load:
+            load_str = f"{load}KW"
+        else:
+            load_str = ""
+
+        right = {
+            "consumer_name":   data.get("consumer_name") or "",
+            "consumer_no":     data.get("consumer_number") or "",
+            "sanct_load":      load_str,
+            "connection_type": data.get("tariff_category") or "",
+            "monthly_units":   data.get("monthly_units") or [],
+            "months":          data.get("months"),
+            "current_bill_amount": data.get("current_bill_amount"),
+            "fixed_charges":   data.get("fixed_charges", 130),
+        }
+        # If we only have an average (no per-month history), seed the last
+        # month with the average so the AVERAGE() formula still resolves.
+        if not right["monthly_units"] and data.get("avg_monthly_consumption"):
+            right["monthly_units"] = [data["avg_monthly_consumption"]] * 12
+        return fill_pranay_template(template_bytes, right=right)
+
+    # Default / unknown -> simple writer
+    return fill_solar_load_template(template_bytes, data)
+
+
 def fill_solar_load_template(
     template_bytes: bytes,
     data: Dict[str, Any],
